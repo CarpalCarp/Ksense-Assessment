@@ -1,97 +1,18 @@
-interface Patient {
-  patient_id: string
-  name: string
-  age: number
-  gender: string
-  blood_pressure: string
-  temperature: number
-  visit_date: Date
-  diagnosis: string
-  medications: string
-}
+import { evaluateAgeRisk, evaluateBloodPressureRisk, evaluateTemperatureRisk } from "./evaluationFunctions.ts";
+import type { FinalResults, Patient } from "./Patient.ts";
 
-interface FinalResults {
-  high_risk_patients: string[]
-  fever_patients: string[]
-  data_quality_issues: string[]
-}
-
-const patientMap: Map<string, number> = new Map();
 const patientResults: FinalResults = {
   high_risk_patients: [],
   fever_patients: [],
   data_quality_issues: []
 };
+let totalRecords = 0;
 
-function delay(ms: number) {
+function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function evaluateBloodPressureRisk(patient: Patient) {
-  if (!patient.blood_pressure) {
-    patientResults.data_quality_issues.push(patient.patient_id);
-    return;
-  }
-  const [systolic, dialostic] = patient.blood_pressure.split('/').map((value) => parseInt(value));
-  if (systolic === undefined || dialostic === undefined || isNaN(systolic) || isNaN(dialostic)) {
-    patientResults.data_quality_issues.push(patient.patient_id);
-    return;
-  }
-
-  let score = patientMap.get(patient.patient_id) ?? 0;
-  if (systolic >= 140 || dialostic >= 90) {
-    score += 3;
-  } else if ((systolic >= 130 && systolic <= 139) || (dialostic >= 80 && dialostic <= 89)) {
-    score += 2
-  } else if (systolic >= 120 && systolic <= 129 && dialostic < 80) {
-    score += 1;
-  } else if (systolic < 120 && dialostic < 80) {
-    score += 0;
-  }
-
-  patientMap.set(patient.patient_id, score);
-}
-
-function evaluateTemperatureRisk(patient: Patient) {
-  if (!patient.temperature || isNaN(patient.temperature)) {
-    patientResults.data_quality_issues.push(patient.patient_id);
-    return;
-  }
-
-  let score = patientMap.get(patient.patient_id) ?? 0;
-  if (patient.temperature >= 99.6) {
-    patientResults.fever_patients.push(patient.patient_id);
-  }
-  if (patient.temperature > 99.6 && patient.temperature < 100.9) {
-    score += 1;
-  } else if (patient.temperature <= 99.5) {
-    score += 0
-  } else if (patient.temperature >= 101) {
-    score += 2;
-  }
-
-  patientMap.set(patient.patient_id, score);
-}
-
-function evaluateAgeRisk(patient: Patient) {
-  if (!patient.age || isNaN(patient.age)) {
-    patientResults.data_quality_issues.push(patient.patient_id);
-    return;
-  }
-
-  let score = patientMap.get(patient.patient_id) ?? 0;
-  if (patient.age >= 40 && patient.age <= 65) {
-    score += 1;
-  } else if (patient.age < 40) {
-    score += 0;
-  } else if (patient.age > 65) {
-    score += 2;
-  }
-
-  patientMap.set(patient.patient_id, score);
-}
-
-async function fetchPatientList(page: number, limit: number) {
+async function fetchPatientList(page: number, limit: number): Promise<{ data: Patient[]; pagination?: { hasNext: boolean }; total_records: number }> {
   const baseUrl = 'https://assessment.ksensetech.com';
   const url = `${baseUrl}/api/patients?page=${encodeURIComponent(page)}&limit=${encodeURIComponent(limit)}`;
   try {
@@ -104,18 +25,43 @@ async function fetchPatientList(page: number, limit: number) {
     return await response.json();
   } catch (error) {
     console.error('Error fetching patient list:', error);
-    return [];
+    return { data: [], pagination: { hasNext: false }, total_records: 0 };
   }
 }
 
-async function main() {
+async function submitResults(): Promise<void> {
+  const baseUrl = 'https://assessment.ksensetech.com';
+  const url = `${baseUrl}/api/submit-assessment`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'ak_e3bb2519827cfc68dfaeee99a6041b0f3b0d136ad6a6a746',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(patientResults)
+    });
+    const jsonResp = await response.json();
+    console.log('response: ', jsonResp);
+  } catch (error) {
+    console.error('Error submitting results:', error);
+  }
+}
+
+async function main(): Promise<void> {
   const patientList: Patient[] = [];
   let hasNext = true;
   let page = 1;
   while (hasNext) {
     const result = await fetchPatientList(page, 10);
-    hasNext = result.pagination.hasNext ?? false;
-    patientList.push(...result.data);
+    hasNext = result.pagination?.hasNext ?? false;
+    if (result.data) {
+      patientList.push(...result.data);
+    }
+    if (!hasNext) {
+      totalRecords = result.total_records;
+    }
     console.log(`Fetched page ${page} of patients.`);
     await delay(2000); // Adding delay to avoid hitting API rate limits
     page++;
@@ -126,18 +72,25 @@ async function main() {
     return;
   }
 
+  const patientMap: Map<string, number> = new Map();
   for (const patient of patientList) {
     patientMap.set(patient.patient_id, 0);
-    evaluateAgeRisk(patient);
-    evaluateTemperatureRisk(patient);
-    evaluateBloodPressureRisk(patient);
-    const score = patientMap.get(patient.patient_id) ?? 0;
+    const mapWithAge = evaluateAgeRisk(patientResults, patient, patientMap);
+    const mapWithTemp = evaluateTemperatureRisk(patientResults, patient, mapWithAge);
+    const mapWithBloodPressure = evaluateBloodPressureRisk(patientResults, patient, mapWithTemp);
+    const score = mapWithBloodPressure.get(patient.patient_id) ?? 0;
     if (score >= 4) {
       patientResults.high_risk_patients.push(patient.patient_id);
     }
   }
 
-  console.log('patientResults: ', patientResults);
+  console.log(`Fetched ${patientList.length} patients.`);
+  if (totalRecords !== patientList.length) {
+    console.warn(`Total records mismatch: expected ${totalRecords}, fetched ${patientList.length}.`);
+  }
 }
 
-main();
+(async () => {
+  await main();
+  await submitResults();
+})();
